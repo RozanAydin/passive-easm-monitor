@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Create non-root user for secure container execution
+# Create non-root user (UID 1000) for secure container execution
 RUN groupadd --gid 1000 monitor && \
     useradd --uid 1000 --gid monitor --shell /bin/bash --create-home monitor
 
@@ -23,5 +23,4 @@ RUN mkdir -p /app/data /app/logs /app/reports && \
 
 USER monitor
 
-ENTRYPOINT ["python", "-m", "src.main"]
-CMD ["--config", "config/config.yaml"]
+CMD ["python", "-m", "src.main", "--config", "config/config.yaml"]

@@ -2,99 +2,67 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)
 ![Architecture](https://img.shields.io/badge/OSINT-100%25%20Passive-green)
-![Database](https://img.shields.io/badge/Database-SQLite%20%7C%20PostgreSQL-informational)
+![Database](https://img.shields.io/badge/Database-SQLite%20WAL%20%7C%20PostgreSQL-informational)
+![Web](https://img.shields.io/badge/Web-FastAPI%20%2B%20Tailwind-009688)
 ![Container](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
 
-An automated, **100% passive** OSINT & Cyber Threat Intelligence (CTI) monitoring engine built with Python (`asyncio`, `httpx`, `dnspython`, `SQLAlchemy`, `Pydantic`, `Jinja2`). It continuously inventories external attack surfaces, detects active typosquatting/phishing infrastructure, enriches exposed IPs passively, tracks state deltas across scans, dispatches real-time webhook alerts, and exports executive reports and structured IoC feeds.
+An automated, **100% passive** OSINT & Cyber Threat Intelligence (CTI) monitoring platform built with a **Hybrid Architecture**:
+1. **SQLite WAL-backed Target Management** for safe concurrent CLI + Web UI access (`PRAGMA journal_mode=WAL`, `timeout=30`).
+2. **Flexible CLI Worker** (`--target`, `--all`, `--list-targets`, `--remove-target`) for automation and cron jobs.
+3. **Lightweight SOC Web Dashboard** (`FastAPI` + `Jinja2` + `Tailwind CSS`) for managing targets, launching asynchronous background scans, inspecting scan histories, and downloading reports.
 
 ---
 
-## Key Features
+## Ethical & Legal Guardrails (Passive OSINT Disclaimer)
 
-- **Passive EASM Collection (`src/collectors/crtsh_collector.py`, `dns_resolver.py`):** Harvests subdomains from Certificate Transparency logs (`crt.sh`), strips wildcards, enforces exclusions, and performs rate-limited async DNS resolution (`A`, `AAAA`, `CNAME`, `MX`).
-- **Brand & Typosquatting Detection (`src/collectors/typosquat.py`):** Generates domain permutations (*omission*, *repetition*, *transposition*, *hyphenation*, *TLD swap*, *homoglyph*), filters for actively resolving domains (`A`/`MX`), and fetches RDAP registration metadata.
-- **Passive IP Enrichment & PII Redaction (`src/enrichment/internetdb.py`, `sanitizer.py`):** Queries Shodan InternetDB (`ports`, `cpes`, `tags`, `vulns`/CVEs) without sending intrusive packets, and masks emails, phone numbers, and personal contact fields from WHOIS/RDAP payloads.
-- **Stateful Diffing & Idempotency (`src/core/diff_engine.py`, `risk_scorer.py`):** Compares current scan run ($T_n$) against the latest completed scan run ($T_{n-1}$) to flag only new subdomains, IP changes, newly exposed ports, new CVEs, and active spoof domains without duplicate rows or repeat alerts.
-- **Real-Time Alerting & Intelligence Reporting (`src/outputs/notifier.py`, `reporter.py`):** Dispatches severity-filtered alerts to Telegram, Slack, or Discord webhooks and generates `executive_report.md` (optional HTML), `ioc_feed.json`, and `ioc_feed.csv`.
+> **Important:** This software is designed strictly for **authorized defensive security monitoring and passive OSINT research**.
+
+1. **100% Passive Reconnaissance:** Never sends active port-scan packets (e.g., Nmap SYN scans) or directory/credential brute-force traffic to target infrastructure. All exposure intelligence is collected from passive public repositories (Certificate Transparency via `crt.sh`, public DNS/RDAP, Shodan InternetDB).
+2. **Authorized Scope Only:** Only monitor domains you own, authorized lab environments, or public Bug Bounty targets whose Rules of Engagement explicitly permit passive OSINT.
+3. **Strict Input & SSRF Validation (`src/utils/validators.py`):** Rejects IP addresses, `localhost`, `.local`, `.internal`, wildcards, and shell metacharacters across both CLI and Web API inputs.
+4. **Rate Limiting & Exponential Backoff:** All external HTTP/DNS queries enforce concurrency limits, polite rate delays, and exponential backoff (`2s`, `4s`, `8s`) on HTTP `429`/`503`.
+5. **PII Redaction:** Registrant emails, phone numbers, and personal contact fields from WHOIS/RDAP responses are automatically masked (`[REDACTED_EMAIL]`, `[REDACTED_PHONE]`, `[REDACTED_PII]`) before storage or reporting.
 
 ---
 
 ## System Architecture
 
 ```text
-+-------------------+      +-------------------------------------------+
-|   config.yaml     | ---> |           Orchestrator (main.py)          |
-|  & .env Secrets   |      +-------------------------------------------+
-+-------------------+                            |
-                                                 v
-                    +----------------------------+----------------------------+
-                    |                                                         |
-                    v                                                         v
-    +-------------------------------+                         +-------------------------------+
-    |    Module 1: EASM Collector   |                         | Module 2: Typosquat Collector |
-    | - crt.sh (CT Logs)            |                         | - Domain Permutations         |
-    | - Async DNS (A/AAAA/CNAME/MX) |                         | - Async DNS (A / MX)          |
-    | - Scope & Exclusion Filter    |                         | - Public RDAP Metadata        |
-    +-------------------------------+                         +-------------------------------+
-                    |                                                         |
-                    +----------------------------+----------------------------+
-                                                 |
-                                                 v
-                    +---------------------------------------------------------+
-                    |              Module 3: Enrichment Engine                |
-                    | - Shodan InternetDB (Passive Ports, CPEs, Tags, CVEs)   |
-                    | - WHOIS / RDAP PII Redaction Filter                     |
-                    +---------------------------------------------------------+
-                                                 |
-                                                 v
-                    +---------------------------------------------------------+
-                    |           Module 4: Storage & State Diff Engine         |
-                    | - SQLite / PostgreSQL (SQLAlchemy ORM)                  |
-                    | - Delta Comparison (T_n vs T_{n-1}) & Idempotency       |
-                    | - Risk Scoring Engine (LOW -> CRITICAL)                 |
-                    +---------------------------------------------------------+
-                                                 |
-                                                 v
-                    +---------------------------------------------------------+
-                    |          Module 5: Alerting & Reporting Engine          |
-                    | - Real-Time Webhook (Telegram / Slack / Discord)        |
-                    | - Jinja2 Executive Summary Report (Markdown / HTML)     |
-                    | - Structured IoC Export (JSON / CSV)                    |
-                    +---------------------------------------------------------+
++--------------------+     +-------------------------------+
+| config/targets.yaml| --> | SQLite (WAL Mode) / PostgreSQL|
+| & config.yaml/.env |     | (targets, scan_runs, alerts)  |
++--------------------+     +-------------------------------+
+                                    ^             ^
+                    +---------------+             +---------------+
+                    |                                             |
+        +-----------------------+                     +-----------------------+
+        |  CLI Worker (main.py) |                     | FastAPI Web Dashboard |
+        | --target / --all      |                     | (uvicorn :8000)       |
+        +-----------------------+                     +-----------------------+
+                    |                                             |
+                    +---------------+-------------+---------------+
+                                    |
+                                    v
+        +---------------------------------------------------------+
+        | Shared Scan Pipeline (src/core/scanner.py)              |
+        | 1. crt.sh CT Logs + Async DNS (A/AAAA/CNAME/MX)         |
+        | 2. Typosquatting Permutations + Allowlist + RDAP        |
+        | 3. Shodan InternetDB Passive Enrichment + PII Sanitizer |
+        | 4. Stateful Diff Engine (T_n vs T_{n-1}) & Risk Scorer  |
+        | 5. Telegram/Slack/Discord Alerts + Per-Run Reports      |
+        +---------------------------------------------------------+
 ```
 
 ---
 
-## Ethical & Legal Guardrails (Rules of Engagement)
-
-1. **100% Passive Reconnaissance:** Never sends active port-scan packets (e.g., Nmap SYN scans) or directory/credential brute-force traffic to target infrastructure.
-2. **Authorized Scope Only:** Only test against domains you own, lab infrastructure, or public Bug Bounty targets explicitly permitting passive OSINT. Target domains and exclusions are strictly validated via `authorized_scope` and `exclude_subdomains` in `config/config.yaml`.
-3. **Rate Limiting & Exponential Backoff:** All external HTTP/DNS queries enforce concurrency semaphores, configurable rate delays, and exponential backoff (`2s`, `4s`, `8s`) on HTTP `429`/`503`.
-4. **PII Redaction:** Registrant emails, phone numbers, and personal contact attributes from WHOIS/RDAP responses are redacted (`[REDACTED_EMAIL]`, `[REDACTED_PHONE]`, `[REDACTED_PII]`) before storage or reporting.
-
----
-
-## Risk Scoring Rules
+## Dynamic Risk Scoring Rules
 
 | Severity | Trigger Conditions |
 | --- | --- |
-| **CRITICAL** | New resolving subdomain with sensitive open port(s) (e.g., `21`, `22`, `23`, `25`, `445`, `1433`, `3306`, `3389`, `5432`, `6379`, `9200`, `27017`) or known `CVE`; new `CVE` or new sensitive port on an existing asset. |
-| **HIGH** | Newly detected active typosquatting domain (`A` or `MX` record); new non-sensitive open port on an existing asset. |
-| **MEDIUM** | New active subdomain with standard/non-sensitive ports and no CVEs; DNS IP address change (`IP_CHANGE`) on an existing subdomain. |
-| **LOW** | New subdomain discovered in Certificate Transparency logs without active DNS resolution (`NXDOMAIN`). |
-
----
-
-## Database Schema
-
-Defined via SQLAlchemy ORM in `src/core/database.py` (compatible with SQLite and PostgreSQL):
-
-- `targets` — Monitored root domains.
-- `scan_runs` — Execution history (`RUNNING`, `COMPLETED`, `FAILED`), subdomain totals, and new finding counts.
-- `subdomains` — Deduplicated subdomain inventory (`UNIQUE(target_id, fqdn)`) tracking `first_seen_run_id` and `last_seen_run_id`.
-- `ip_enrichments` — Per-run Shodan InternetDB snapshots (`open_ports`, `cves`, `cpes`, `tags`).
-- `typosquat_domains` — Verified active spoof domains (`UNIQUE(target_id, spoof_domain)`) with sanitized RDAP registrar/date metadata.
-- `alerts` — Classified security deltas (`NEW_SUBDOMAIN`, `NEW_PORT`, `NEW_CVE`, `IP_CHANGE`, `TYPOSQUAT_ACTIVE`) and webhook notification status.
+| **CRITICAL** | New resolving subdomain with sensitive open port(s) (`21`, `22`, `23`, `25`, `445`, `1433`, `3306`, `3389`, `5432`, `6379`, `9200`, `27017`) or known `CVE`; new `CVE` or sensitive port on an existing asset; active typosquatting domain registered **within the last 90 days AND with active `MX` records**. |
+| **HIGH** | Active typosquatting domain with `MX` records (phishing/BEC risk); new non-sensitive open port on an existing asset. |
+| **MEDIUM** | New active subdomain with standard/non-sensitive ports and no CVEs; DNS IP change (`IP_CHANGE`); active typosquatting domain with `A`/`AAAA` web IP without `MX`. |
+| **LOW** | Non-resolving subdomain (`NXDOMAIN`) in CT logs; inactive typosquatting domain registered > 5 years ago without web IP or `MX`. |
 
 ---
 
@@ -103,35 +71,35 @@ Defined via SQLAlchemy ORM in `src/core/database.py` (compatible with SQLite and
 ```text
 .
 ├── config/
-│   └── config.yaml              # Target domains, alert thresholds, & collector settings
+│   ├── config.yaml              # Pipeline settings, timeouts, sensitive ports, alerting
+│   └── targets.yaml             # Initial seed targets (imported if DB targets table is empty)
 ├── src/
-│   ├── __init__.py
-│   ├── main.py                  # CLI entry point & pipeline orchestrator
+│   ├── main.py                  # CLI entry point (--target, --all, --list-targets, --remove-target)
 │   ├── config_loader.py         # Pydantic config validation & .env secret loader
 │   ├── logger.py                # Structured logging ([TIMESTAMP] [LEVEL] [MODULE] Message)
+│   ├── utils/
+│   │   └── validators.py        # Strict FQDN normalization & SSRF/injection validation
 │   ├── collectors/
-│   │   ├── crtsh_collector.py   # Passive Certificate Transparency collector
+│   │   ├── crtsh_collector.py   # Passive CT log collector (40s timeout, params encoding)
 │   │   ├── dns_resolver.py      # Async DNS resolver (A, AAAA, CNAME, MX)
-│   │   └── typosquat.py         # Permutation generator, DNS verifier, & RDAP collector
+│   │   └── typosquat.py         # Permutation generator, DNS verifier, allowlist & RDAP
 │   ├── enrichment/
-│   │   ├── internetdb.py        # Passive Shodan InternetDB API client
+│   │   ├── internetdb.py        # Passive Shodan InternetDB client
 │   │   └── sanitizer.py         # PII redaction filter for WHOIS/RDAP
 │   ├── core/
-│   │   ├── database.py          # SQLAlchemy ORM models & session manager
-│   │   ├── diff_engine.py       # State comparison (T_n vs T_{n-1})
-│   │   └── risk_scorer.py       # Severity classification & remediation recommendations
-│   └── outputs/
-│       ├── notifier.py          # Telegram / Slack / Discord webhook dispatcher
-│       └── reporter.py          # Jinja2 report generator & JSON/CSV IoC exporter
+│   │   ├── database.py          # SQLAlchemy ORM models, SQLite WAL mode & seeding
+│   │   ├── scanner.py           # Shared async scan orchestrator (CLI + Web)
+│   │   ├── diff_engine.py       # Stateful delta comparison & idempotency
+│   │   └── risk_scorer.py       # Dynamic severity scoring & English recommendations
+│   ├── outputs/
+│   │   ├── notifier.py          # Telegram / Slack / Discord webhook dispatcher
+│   │   └── reporter.py          # Per-run & latest Markdown/HTML/JSON/CSV report exporter
+│   └── web/
+│       ├── app.py               # FastAPI Web UI & REST API
+│       └── templates/           # Dark-mode SOC Jinja2 + Tailwind templates
 ├── templates/
 │   └── executive_report.md.j2   # Markdown executive summary template
-├── tests/
-│   ├── test_diff_engine.py      # Diffing, severity rules, & idempotency unit tests
-│   ├── test_integration.py      # End-to-end mocked pipeline + SQLite integration tests
-│   ├── test_sanitizer.py        # PII redaction tests
-│   └── test_typosquat.py        # Permutation & RDAP collector tests
-├── .env.example                 # Environment variable template for secrets
-├── .gitignore
+├── tests/                       # Pytest unit & integration suite
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -139,103 +107,79 @@ Defined via SQLAlchemy ORM in `src/core/database.py` (compatible with SQLite and
 
 ---
 
-## Configuration
-
-### 1. Environment Secrets (`.env`)
-
-Copy `.env.example` to `.env` and populate only the notification provider(s) you use. Secrets are loaded exclusively from environment variables and are rejected if placed inside `config/config.yaml`.
-
-```bash
-cp .env.example .env
-```
-
-Available variables:
-- `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID`
-- `SLACK_WEBHOOK_URL`
-- `DISCORD_WEBHOOK_URL`
-- `DATABASE_URL` (optional override, e.g., for PostgreSQL)
-
-### 2. Target & Pipeline Settings (`config/config.yaml`)
-
-Configure target domains, `exclude_subdomains`, optional `authorized_scope`, collector concurrency/timeouts, `sensitive_ports`, `alerting`, and `reporting`.
-
----
-
 ## Quick Start
 
-### Local Execution (Python 3.11+)
+### 1. Local Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-
-python -m src.main --config config/config.yaml
 ```
 
-#### CLI Options
+### 2. CLI Mode (Automation & Cron Jobs)
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--config` | `config/config.yaml` | Path to YAML configuration file |
-| `--env` | `.env` | Path to `.env` secrets file |
-| `--target` | `None` | Run only a specific configured domain |
-| `--skip-notify` | `False` | Skip webhook alert delivery (dry run) |
-| `--log-file` | `logs/monitor.log` | Structured log output file path |
-| `--verbose` | `False` | Enable `DEBUG` log verbosity |
+```bash
+# List registered targets in SQLite (auto-seeds from config/targets.yaml if empty)
+python -m src.main --list-targets
 
-### Containerized Execution (Docker)
+# Upsert and scan a single authorized domain immediately
+python -m src.main --target owasp.org
+
+# Scan all active targets in SQLite (default when no flags are provided)
+python -m src.main --all
+
+# Remove a target from the database
+python -m src.main --remove-target example.com
+```
+
+### 3. Web Dashboard Mode (`http://localhost:8000`)
+
+Start the FastAPI dashboard locally:
+
+```bash
+uvicorn src.web.app:app --host 127.0.0.1 --port 8000
+```
+
+Then open **http://localhost:8000** in your browser to:
+- Add root domains with optional comma-separated allowlists and trigger background scans (`202 Accepted`).
+- Monitor live `scan_status` (`idle`, `running`, `completed`, `failed`) with automatic polling.
+- Inspect historical `Scan Run ID`s, severity KPI cards, Delta Alerts, Subdomain Inventory, and Typosquatting/RDAP tables.
+- Download per-run `executive_report.md`, `ioc_feed.json`, and `ioc_feed.csv`.
+
+---
+
+## Docker Usage
+
+Build and start the Web Dashboard (`easm-web` bound to `127.0.0.1:8000`):
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose --profile cli build
+docker compose up -d easm-web
 ```
 
-Persistent outputs are mounted to `./data/`, `./logs/`, and `./reports/`.
+Run an ad-hoc or cron CLI scan sharing the same SQLite WAL database and reports volume:
+
+```bash
+docker compose run --rm easm-monitor --target owasp.org
+docker compose run --rm easm-monitor --list-targets
+```
 
 ---
 
-## Outputs
+## Output Reports
 
-After a scan finishes, the following artifacts are generated under `./reports/`:
-
-- `executive_report.md` (and `executive_report.html` if `"html"` is enabled in `export_formats`): Executive summary with severity counts, delta findings, subdomain inventory, typosquatting table, and remediation actions.
-- `ioc_feed.json`: Structured IoC feed for automation/SOAR ingestion:
-
-```json
-{
-  "metadata": {
-    "generated_at": "2026-11-26T01:30:00Z",
-    "target_domain": "example.com",
-    "scan_run_id": 14,
-    "total_new_findings": 2
-  },
-  "indicators": [
-    {
-      "indicator_type": "domain-name",
-      "indicator_value": "examp1e.com",
-      "category": "TYPOSQUAT_ACTIVE",
-      "severity": "HIGH",
-      "attributes": {
-        "permutation_type": "homoglyph",
-        "resolved_ip": "198.51.100.42",
-        "has_mx_record": true
-      },
-      "recommended_action": "Ajukan takedown domain examp1e.com dan blokir domain pengirim pada Secure Email Gateway."
-    }
-  ]
-}
-```
-
-- `ioc_feed.csv`: Tabular IoC export for spreadsheet or SIEM ingestion.
-- `logs/monitor.log`: Timestamped execution logs.
+Reports are persisted per target/run under `./reports/{domain}/run_{run_id}_*` and also mirrored to `./reports/` for the latest run:
+- `executive_report.md`
+- `ioc_feed.json`
+- `ioc_feed.csv`
+- `logs/monitor.log`
 
 ---
 
-## Running Tests
-
-Run all unit and end-to-end integration tests with `pytest`:
+## Testing
 
 ```bash
 pytest -v

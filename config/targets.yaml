@@ -1,0 +1,6 @@
+# Initial seed targets (imported automatically into SQLite if the targets table is empty)
+targets:
+  - domain: "example.com"
+    is_active: true
+    allowlist:
+      - "dev-sandbox.example.com"

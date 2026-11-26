@@ -44,6 +44,15 @@ def _format_utc_iso(dt: datetime | None = None) -> str:
     return now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+FORMAT_EXTENSIONS: dict[str, tuple[str, str]] = {
+    "md": ("markdown", "executive_report.md"),
+    "markdown": ("markdown", "executive_report.md"),
+    "html": ("html", "executive_report.html"),
+    "json": ("json", "ioc_feed.json"),
+    "csv": ("csv", "ioc_feed.csv"),
+}
+
+
 class IntelligenceReporter:
     """Generates executive reports and structured IoC feeds from persisted scan results."""
 
@@ -175,7 +184,6 @@ class IntelligenceReporter:
                     }
                 )
             else:
-                # NEW_SUBDOMAIN / IP_CHANGE
                 sub = sub_by_fqdn.get(alert.indicator)
                 ip = sub.ip_address if sub else None
                 enrich = enrichment_by_ip.get(ip or "", {})
@@ -217,47 +225,32 @@ class IntelligenceReporter:
             "indicators": indicators,
         }
 
-    def export_reports(
+    def run_report_path(self, domain: str, run_id: int, filename: str) -> Path:
+        """Return isolated per-target, per-run report path."""
+        return self.output_dir / domain / f"run_{run_id}_{filename}"
+
+    def _write_format(
         self,
-        session: Session,
-        target: Target,
-        scan_run: ScanRun,
-        export_formats: list[str] | None = None,
-        per_target_subdir: bool = False,
-    ) -> dict[str, Path]:
-        """Render and write executive reports and IoC feeds to disk."""
-        formats = [f.lower() for f in (export_formats or ["markdown", "json", "csv"])]
-        target_dir = self.output_dir / target.domain if per_target_subdir else self.output_dir
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        context = self.build_report_context(session, target, scan_run)
-        generated_files: dict[str, Path] = {}
-
-        if "markdown" in formats:
+        fmt: str,
+        context: dict[str, Any],
+        dest_path: Path,
+    ) -> None:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if fmt == "markdown":
             template = self.jinja_env.get_template("executive_report.md.j2")
-            rendered_md = template.render(**context)
-            md_path = target_dir / "executive_report.md"
-            md_path.write_text(rendered_md, encoding="utf-8")
-            generated_files["markdown"] = md_path
-            logger.info("Generated Markdown executive report: %s", md_path)
-
-        if "html" in formats:
+            dest_path.write_text(template.render(**context), encoding="utf-8")
+        elif fmt == "html":
             template = self.jinja_env.get_template("executive_report.md.j2")
-            rendered_md = template.render(**context)
-            escaped = html.escape(rendered_md)
+            escaped = html.escape(template.render(**context))
             html_content = (
                 "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-                f"<title>Threat Intel Report - {html.escape(target.domain)}</title>"
+                f"<title>Threat Intel Report - {html.escape(context['target_domain'])}</title>"
                 "<style>body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;}"
                 "pre{white-space:pre-wrap;background:#f6f8fa;padding:1rem;border-radius:6px;}</style>"
                 f"</head><body><pre>{escaped}</pre></body></html>"
             )
-            html_path = target_dir / "executive_report.html"
-            html_path.write_text(html_content, encoding="utf-8")
-            generated_files["html"] = html_path
-            logger.info("Generated HTML executive report: %s", html_path)
-
-        if "json" in formats:
+            dest_path.write_text(html_content, encoding="utf-8")
+        elif fmt == "json":
             ioc_payload = {
                 "metadata": {
                     "generated_at": context["generated_at"],
@@ -267,14 +260,9 @@ class IntelligenceReporter:
                 },
                 "indicators": context["indicators"],
             }
-            json_path = target_dir / "ioc_feed.json"
-            json_path.write_text(json.dumps(ioc_payload, indent=2), encoding="utf-8")
-            generated_files["json"] = json_path
-            logger.info("Generated IoC JSON feed: %s", json_path)
-
-        if "csv" in formats:
-            csv_path = target_dir / "ioc_feed.csv"
-            with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+            dest_path.write_text(json.dumps(ioc_payload, indent=2), encoding="utf-8")
+        elif fmt == "csv":
+            with dest_path.open("w", newline="", encoding="utf-8") as csv_file:
                 writer = csv.DictWriter(
                     csv_file,
                     fieldnames=[
@@ -298,7 +286,51 @@ class IntelligenceReporter:
                             "recommended_action": ioc["recommended_action"],
                         }
                     )
-            generated_files["csv"] = csv_path
-            logger.info("Generated IoC CSV feed: %s", csv_path)
+
+    def export_reports(
+        self,
+        session: Session,
+        target: Target,
+        scan_run: ScanRun,
+        export_formats: list[str] | None = None,
+        update_latest: bool = True,
+    ) -> dict[str, Path]:
+        """Render per-target/run reports and also update top-level latest report files."""
+        formats = [f.lower() for f in (export_formats or ["markdown", "json", "csv"])]
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        context = self.build_report_context(session, target, scan_run)
+        generated_files: dict[str, Path] = {}
+
+        for raw_fmt in formats:
+            if raw_fmt not in FORMAT_EXTENSIONS:
+                continue
+            norm_fmt, filename = FORMAT_EXTENSIONS[raw_fmt]
+            per_run_path = self.run_report_path(target.domain, scan_run.id, filename)
+            self._write_format(norm_fmt, context, per_run_path)
+            generated_files[norm_fmt] = per_run_path
+
+            if update_latest:
+                latest_path = self.output_dir / filename
+                self._write_format(norm_fmt, context, latest_path)
+
+            logger.info("Generated %s report: %s", norm_fmt, per_run_path)
 
         return generated_files
+
+    def get_or_generate_report_file(
+        self,
+        session: Session,
+        target: Target,
+        scan_run: ScanRun,
+        fmt: str,
+    ) -> Path:
+        """Return path to a specific run's report, generating it on-demand if absent."""
+        fmt_key = fmt.lower()
+        if fmt_key not in FORMAT_EXTENSIONS:
+            raise ValueError(f"Unsupported report format: '{fmt}'")
+        norm_fmt, filename = FORMAT_EXTENSIONS[fmt_key]
+        path = self.run_report_path(target.domain, scan_run.id, filename)
+        if not path.exists():
+            context = self.build_report_context(session, target, scan_run)
+            self._write_format(norm_fmt, context, path)
+        return path

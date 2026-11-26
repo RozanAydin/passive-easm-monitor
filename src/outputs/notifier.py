@@ -95,10 +95,11 @@ class WebhookNotifier:
                 logger.error("Webhook delivery failed with HTTP %d", response.status_code)
                 return False
             except httpx.RequestError as exc:
+                err_detail = f"{type(exc).__name__}: {exc}"
                 if attempt < len(RETRY_DELAYS):
                     await asyncio.sleep(RETRY_DELAYS[attempt])
                     continue
-                logger.error("Webhook request error: %s", exc)
+                logger.error("Webhook request error: %s", err_detail)
                 return False
         return False
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Literal
 
@@ -11,27 +10,18 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-DOMAIN_REGEX = re.compile(
-    r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$"
+from src.utils.validators import (
+    is_domain_allowlisted,
+    validate_allowlist_entry,
+    validate_and_normalize_domain,
 )
-WILDCARD_DOMAIN_REGEX = re.compile(
-    r"^\*\.(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$"
-)
-IPV4_REGEX = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 
 def validate_domain_name(value: str, allow_wildcard: bool = False) -> str:
-    """Normalize and validate a domain name string."""
-    normalized = value.strip().lower().rstrip(".")
-    if not normalized or len(normalized) > 253:
-        raise ValueError(f"Invalid domain length: '{value}'")
-    if IPV4_REGEX.match(normalized):
-        raise ValueError(f"IP address is not a valid domain name: '{value}'")
-    if allow_wildcard and WILDCARD_DOMAIN_REGEX.match(normalized):
-        return normalized
-    if not DOMAIN_REGEX.match(normalized):
-        raise ValueError(f"Invalid domain format: '{value}'")
-    return normalized
+    """Normalize and validate a domain name string (delegating to src.utils.validators)."""
+    if allow_wildcard:
+        return validate_allowlist_entry(value, allow_wildcard=True)
+    return validate_and_normalize_domain(value)
 
 
 class ProjectConfig(BaseModel):
@@ -52,12 +42,12 @@ class TargetConfig(BaseModel):
     @field_validator("domain")
     @classmethod
     def check_domain(cls, v: str) -> str:
-        return validate_domain_name(v, allow_wildcard=False)
+        return validate_and_normalize_domain(v)
 
     @field_validator("exclude_subdomains")
     @classmethod
     def check_exclude_subdomains(cls, values: list[str]) -> list[str]:
-        return [validate_domain_name(item, allow_wildcard=True) for item in values]
+        return [validate_allowlist_entry(item, allow_wildcard=True) for item in values]
 
     @model_validator(mode="after")
     def validate_scope_consistency(self) -> "TargetConfig":
@@ -71,6 +61,7 @@ class TargetConfig(BaseModel):
 class CollectorSettings(BaseModel):
     dns_concurrency: int = Field(default=20, ge=1, le=100)
     request_timeout_sec: int = Field(default=10, ge=1, le=120)
+    crtsh_timeout_sec: int = Field(default=40, ge=5, le=180)
     rate_limit_delay_sec: float = Field(default=0.5, ge=0.0, le=60.0)
     sensitive_ports: list[int] = Field(
         default_factory=lambda: [21, 22, 23, 25, 445, 1433, 3306, 3389, 5432, 6379, 9200, 27017]
@@ -119,7 +110,7 @@ class SecretsConfig(BaseModel):
 class AppConfig(BaseModel):
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    targets: list[TargetConfig] = Field(min_length=1)
+    targets: list[TargetConfig] = Field(default_factory=list)
     authorized_scope: list[str] | None = None
     collector_settings: CollectorSettings = Field(default_factory=CollectorSettings)
     alerting: AlertingConfig = Field(default_factory=AlertingConfig)
@@ -130,7 +121,7 @@ class AppConfig(BaseModel):
     def check_authorized_scope(cls, scope: list[str] | None) -> list[str] | None:
         if scope is None:
             return None
-        return [validate_domain_name(d, allow_wildcard=False) for d in scope]
+        return [validate_and_normalize_domain(d) for d in scope]
 
     @model_validator(mode="after")
     def enforce_authorized_scope(self) -> "AppConfig":
@@ -146,16 +137,7 @@ class AppConfig(BaseModel):
 
 def is_subdomain_excluded(fqdn: str, exclude_patterns: list[str]) -> bool:
     """Return True if fqdn matches an exact or wildcard exclusion entry."""
-    normalized = fqdn.strip().lower().rstrip(".")
-    for pattern in exclude_patterns:
-        pat = pattern.strip().lower().rstrip(".")
-        if pat.startswith("*."):
-            suffix = pat[1:]  # e.g. '.dev.example.com'
-            if normalized.endswith(suffix) or normalized == pat[2:]:
-                return True
-        elif normalized == pat:
-            return True
-    return False
+    return is_domain_allowlisted(fqdn, exclude_patterns)
 
 
 def load_config(
@@ -175,8 +157,12 @@ def load_config(
     with path.open("r", encoding="utf-8") as f:
         raw_data = yaml.safe_load(f) or {}
 
-    # Reject secret credentials accidentally placed in config.yaml
-    forbidden_keys = {"telegram_bot_token", "telegram_chat_id", "slack_webhook_url", "discord_webhook_url"}
+    forbidden_keys = {
+        "telegram_bot_token",
+        "telegram_chat_id",
+        "slack_webhook_url",
+        "discord_webhook_url",
+    }
     alerting_raw = raw_data.get("alerting", {})
     if isinstance(alerting_raw, dict) and any(k in alerting_raw for k in forbidden_keys):
         raise ValueError(
@@ -185,7 +171,6 @@ def load_config(
 
     app_config = AppConfig.model_validate(raw_data)
 
-    # Allow DATABASE_URL environment override for containerized deployments
     env_db_url = os.getenv("DATABASE_URL")
     if env_db_url:
         app_config.database.url = env_db_url

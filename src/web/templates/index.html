@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+{% block title %}SOC Dashboard - Passive EASM Monitor{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+  <!-- Target Management Panel -->
+  <section class="rounded-xl border border-slate-800 bg-socpanel p-6 shadow-lg">
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-5">
+      <div>
+        <h1 class="text-lg font-semibold text-white">Target Management</h1>
+        <p class="text-xs text-slate-400 mt-0.5">
+          Register an authorized root domain to monitor subdomains, passive exposures, and lookalike phishing domains.
+        </p>
+      </div>
+    </div>
+
+    <form id="add-target-form" class="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+      <div class="md:col-span-4">
+        <label for="domain-input" class="block text-xs font-medium text-slate-300 mb-1.5">
+          Root Domain (FQDN)
+        </label>
+        <input
+          id="domain-input"
+          name="domain"
+          type="text"
+          required
+          placeholder="example.com"
+          class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+        />
+      </div>
+
+      <div class="md:col-span-5">
+        <label for="allowlist-input" class="block text-xs font-medium text-slate-300 mb-1.5">
+          Allowlist Domains / Subdomains (optional, comma-separated)
+        </label>
+        <input
+          id="allowlist-input"
+          name="allowlist"
+          type="text"
+          placeholder="example.org, dev-sandbox.example.com"
+          class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+        />
+      </div>
+
+      <div class="md:col-span-3 flex items-center justify-between gap-3">
+        <label class="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+          <input id="scan-now-input" type="checkbox" checked class="rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500" />
+          Scan now
+        </label>
+        <button
+          type="submit"
+          id="add-target-btn"
+          class="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-sm font-medium text-white transition shadow-sm"
+        >
+          Add Target
+        </button>
+      </div>
+    </form>
+
+    <div id="form-feedback" class="hidden mt-3 rounded-lg px-3.5 py-2 text-xs"></div>
+  </section>
+
+  <!-- Target List Table -->
+  <section class="rounded-xl border border-slate-800 bg-socpanel shadow-lg overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+      <h2 class="text-base font-semibold text-white">Monitored Targets ({{ targets|length }})</h2>
+      <span id="polling-indicator" class="text-xs text-amber-400 {% if not has_running %}hidden{% endif %}">
+        Live polling active...
+      </span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-slate-900/70 text-xs uppercase text-slate-400 border-b border-slate-800">
+          <tr>
+            <th class="px-6 py-3">Domain</th>
+            <th class="px-4 py-3">Active</th>
+            <th class="px-4 py-3">Scan Status</th>
+            <th class="px-4 py-3">Latest Run</th>
+            <th class="px-4 py-3">Last Scanned (UTC)</th>
+            <th class="px-6 py-3 text-right">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for t in targets %}
+          <tr data-target-id="{{ t.id }}" data-scan-status="{{ t.scan_status }}" class="hover:bg-slate-900/40 transition">
+            <td class="px-6 py-4">
+              <div class="font-medium text-white">{{ t.domain }}</div>
+              {% if t.allowlist %}
+              <div class="text-xs text-slate-400 mt-0.5">
+                Allowlist: {{ t.allowlist | join(", ") }}
+              </div>
+              {% endif %}
+              {% if t.last_error %}
+              <div class="text-xs text-rose-400 mt-1 max-w-md truncate" title="{{ t.last_error }}">
+                Error: {{ t.last_error }}
+              </div>
+              {% endif %}
+            </td>
+
+            <td class="px-4 py-4">
+              <span class="active-badge inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium {% if t.is_active %}bg-emerald-500/15 text-emerald-300 border border-emerald-500/30{% else %}bg-slate-700/40 text-slate-400 border border-slate-600/40{% endif %}">
+                {{ "Active" if t.is_active else "Paused" }}
+              </span>
+            </td>
+
+            <td class="px-4 py-4">
+              {% set st = t.scan_status %}
+              <span class="status-badge inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium
+                {% if st == 'running' %}bg-amber-500/15 text-amber-300 border border-amber-500/30
+                {% elif st == 'completed' %}bg-sky-500/15 text-sky-300 border border-sky-500/30
+                {% elif st == 'failed' %}bg-rose-500/15 text-rose-300 border border-rose-500/30
+                {% else %}bg-slate-700/40 text-slate-300 border border-slate-600/40{% endif %}">
+                {% if st == 'running' %}<span class="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping"></span>{% endif %}
+                {{ st }}
+              </span>
+            </td>
+
+            <td class="px-4 py-4 text-xs text-slate-300">
+              {% if t.latest_run_id %}
+              <span class="font-mono text-slate-200">#{{ t.latest_run_id }}</span>
+              <span class="text-slate-400 ml-1">({{ t.total_subdomains }} subs, {{ t.new_findings_count }} alerts)</span>
+              {% else %}
+              <span class="text-slate-500">N/A</span>
+              {% endif %}
+            </td>
+
+            <td class="px-4 py-4 text-xs text-slate-400 last-scanned-cell">
+              {{ t.last_scanned_at or "N/A" }}
+            </td>
+
+            <td class="px-6 py-4 text-right whitespace-nowrap space-x-2">
+              <a
+                href="/targets/{{ t.domain }}"
+                class="inline-flex items-center rounded-md border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition"
+              >
+                View Results
+              </a>
+              <button
+                type="button"
+                onclick="triggerScan({{ t.id }})"
+                class="scan-btn inline-flex items-center rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed px-2.5 py-1.5 text-xs font-medium text-white transition"
+                {% if t.scan_status == 'running' %}disabled{% endif %}
+              >
+                Scan Now
+              </button>
+              <button
+                type="button"
+                onclick="toggleTarget({{ t.id }})"
+                class="inline-flex items-center rounded-md border border-slate-700 bg-slate-900 hover:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition"
+              >
+                Toggle Active
+              </button>
+              <button
+                type="button"
+                onclick="deleteTarget({{ t.id }}, '{{ t.domain }}')"
+                class="inline-flex items-center rounded-md border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 px-2.5 py-1.5 text-xs font-medium text-rose-300 transition"
+              >
+                Delete
+              </button>
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-sm text-slate-400">
+              No targets configured yet. Add a root domain above to start monitoring.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const form = document.getElementById('add-target-form');
+  const feedback = document.getElementById('form-feedback');
+
+  function showFeedback(message, isError = false) {
+    feedback.textContent = message;
+    feedback.className = isError
+      ? 'mt-3 rounded-lg px-3.5 py-2 text-xs bg-rose-500/15 text-rose-300 border border-rose-500/30'
+      : 'mt-3 rounded-lg px-3.5 py-2 text-xs bg-emerald-500/15 text-emerald-300 border border-emerald-500/30';
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const domain = document.getElementById('domain-input').value.trim();
+    const allowlist = document.getElementById('allowlist-input').value.trim();
+    const scanNow = document.getElementById('scan-now-input').checked;
+
+    try {
+      const res = await fetch('/api/targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain, allowlist, scan_now: scanNow })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showFeedback(data.detail || 'Failed to add target.', true);
+        return;
+      }
+      window.location.reload();
+    } catch (err) {
+      showFeedback('Network error while adding target.', true);
+    }
+  });
+
+  async function triggerScan(targetId) {
+    try {
+      const res = await fetch(`/api/targets/${targetId}/scan`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        showFeedback(data.detail || 'Failed to start scan.', true);
+        return;
+      }
+      window.location.reload();
+    } catch (err) {
+      showFeedback('Network error while triggering scan.', true);
+    }
+  }
+
+  async function toggleTarget(targetId) {
+    try {
+      const res = await fetch(`/api/targets/${targetId}/toggle`, { method: 'PATCH' });
+      if (!res.ok) {
+        const data = await res.json();
+        showFeedback(data.detail || 'Failed to toggle target.', true);
+        return;
+      }
+      window.location.reload();
+    } catch (err) {
+      showFeedback('Network error while toggling target.', true);
+    }
+  }
+
+  async function deleteTarget(targetId, domain) {
+    if (!confirm(`Delete target '${domain}' and all its historical scan data?`)) return;
+    try {
+      const res = await fetch(`/api/targets/${targetId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        showFeedback(data.detail || 'Failed to delete target.', true);
+        return;
+      }
+      window.location.reload();
+    } catch (err) {
+      showFeedback('Network error while deleting target.', true);
+    }
+  }
+
+  function startStatusPolling() {
+    const runningRows = document.querySelectorAll('tr[data-scan-status="running"]');
+    if (runningRows.length === 0) return;
+
+    const timer = setInterval(async () => {
+      let stillRunning = false;
+      for (const row of runningRows) {
+        const id = row.getAttribute('data-target-id');
+        try {
+          const res = await fetch(`/api/targets/${id}/status`);
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (data.scan_status === 'running') {
+            stillRunning = true;
+          } else {
+            clearInterval(timer);
+            window.location.reload();
+            return;
+          }
+        } catch (err) {
+          stillRunning = true;
+        }
+      }
+      if (!stillRunning) {
+        clearInterval(timer);
+        window.location.reload();
+      }
+    }, 3000);
+  }
+
+  startStatusPolling();
+</script>
+{% endblock %}

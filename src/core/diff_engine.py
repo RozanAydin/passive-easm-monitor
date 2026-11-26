@@ -29,6 +29,7 @@ from src.core.risk_scorer import (
 )
 from src.enrichment.internetdb import InternetDBResult
 from src.logger import get_logger
+from src.utils.validators import is_domain_allowlisted
 
 logger = get_logger("core.diff_engine")
 
@@ -91,6 +92,16 @@ class StateDiffEngine:
     ) -> DiffSummary:
         """Persist observations, detect deltas vs T_{n-1}, and emit scored alerts."""
         prev_run = self._get_previous_completed_run(session, target.id, current_run.id)
+        allowlist = target.get_allowlist()
+
+        filtered_dns = {
+            fqdn: res
+            for fqdn, res in dns_results.items()
+            if not is_domain_allowlisted(fqdn, allowlist)
+        }
+        filtered_typosquats = [
+            ts for ts in typosquats if not is_domain_allowlisted(ts.spoof_domain, allowlist)
+        ]
 
         existing_subdomains: dict[str, Subdomain] = {
             sub.fqdn: sub
@@ -122,7 +133,7 @@ class StateDiffEngine:
         old_ip_by_new_ip_from_existing_sub: dict[str, set[str]] = {}
 
         # 1. Process subdomains & IP changes
-        for fqdn, dns_res in sorted(dns_results.items()):
+        for fqdn, dns_res in sorted(filtered_dns.items()):
             ip = dns_res.primary_ip
             if ip:
                 ip_to_subdomains.setdefault(ip, []).append(fqdn)
@@ -185,7 +196,7 @@ class StateDiffEngine:
                         severity=score_ip_change(),
                         indicator=fqdn,
                         description=(
-                            f"DNS IP change detected for '{fqdn}': {old_ip or 'None'} -> {ip}."
+                            f"DNS IP change detected for '{fqdn}': {old_ip or 'N/A'} -> {ip}."
                         ),
                     )
                     session.add(alert)
@@ -226,7 +237,6 @@ class StateDiffEngine:
                     prev_ports |= p_ports
                     prev_cves |= p_cves
             else:
-                # Brand new IP from a newly discovered subdomain is already scored in NEW_SUBDOMAIN
                 continue
 
             new_ports = sorted(set(res.open_ports) - prev_ports)
@@ -263,7 +273,7 @@ class StateDiffEngine:
                 new_alerts.append(alert)
 
         # 3. Process active typosquatting domains
-        for ts in typosquats:
+        for ts in filtered_typosquats:
             if ts.spoof_domain not in existing_typosquats:
                 row = TyposquatDomain(
                     target_id=target.id,
@@ -281,6 +291,7 @@ class StateDiffEngine:
                 severity = score_typosquat(
                     has_a_record=bool(ts.ip_address),
                     has_mx_record=ts.has_mx_record,
+                    registration_date=ts.registration_date,
                 )
                 alert = Alert(
                     scan_run_id=current_run.id,
@@ -291,7 +302,8 @@ class StateDiffEngine:
                     description=(
                         f"Active typosquatting domain '{ts.spoof_domain}' "
                         f"(type={ts.permutation_type}, IP={ts.ip_address or 'N/A'}, "
-                        f"MX={ts.has_mx_record}, registrar={ts.registrar or 'Unknown'})."
+                        f"MX={ts.has_mx_record}, registrar={ts.registrar or 'N/A'}, "
+                        f"registered={ts.registration_date or 'N/A'})."
                     ),
                 )
                 session.add(alert)
@@ -305,7 +317,7 @@ class StateDiffEngine:
                 existing_ts.last_seen_run_id = current_run.id
 
         # 4. Finalize ScanRun metrics
-        current_run.total_subdomains = len(dns_results)
+        current_run.total_subdomains = len(filtered_dns)
         current_run.new_findings_count = len(new_alerts)
         current_run.status = "COMPLETED"
         current_run.finished_at = utc_now()
@@ -322,6 +334,6 @@ class StateDiffEngine:
             scan_run_id=current_run.id,
             target_domain=target.domain,
             alerts=new_alerts,
-            total_subdomains=len(dns_results),
-            total_typosquats=len(typosquats),
+            total_subdomains=len(filtered_dns),
+            total_typosquats=len(filtered_typosquats),
         )

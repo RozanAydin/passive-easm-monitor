@@ -98,17 +98,18 @@ class InternetDBClient:
                         )
                         return InternetDBResult(ip_address=ip_address, found=False)
                     except httpx.RequestError as exc:
+                        err_detail = f"{type(exc).__name__}: {exc}"
                         if attempt < len(RETRY_DELAYS):
                             delay = RETRY_DELAYS[attempt]
                             logger.warning(
                                 "InternetDB request error for %s (%s); retrying in %ds",
                                 ip_address,
-                                exc,
+                                err_detail,
                                 delay,
                             )
                             await asyncio.sleep(delay)
                             continue
-                        logger.error("InternetDB failed for %s: %s", ip_address, exc)
+                        logger.error("InternetDB failed for %s: %s", ip_address, err_detail)
                         return InternetDBResult(ip_address=ip_address, found=False)
         finally:
             if owns_client and active_client is not None:

@@ -37,7 +37,7 @@ No new security deltas detected in this scan run. Attack surface state matches t
 {% if subdomains %}
 | Subdomain (FQDN) | Resolving | IP Address | Open Ports | CVEs |
 | --- | --- | --- | --- | --- |
-{% for sub in subdomains %}| `{{ sub.fqdn }}` | {{ "Yes" if sub.is_resolving else "No (NXDOMAIN)" }} | `{{ sub.ip_address or "-" }}` | {{ sub.open_ports | join(", ") if sub.open_ports else "-" }} | {{ sub.cves | join(", ") if sub.cves else "-" }} |
+{% for sub in subdomains %}| `{{ sub.fqdn }}` | {{ "Yes" if sub.is_resolving else "No (NXDOMAIN)" }} | `{{ sub.ip_address or "N/A" }}` | {{ sub.open_ports | join(", ") if sub.open_ports else "N/A" }} | {{ sub.cves | join(", ") if sub.cves else "N/A" }} |
 {% endfor %}
 {% else %}
 No subdomains recorded for this target.
@@ -50,7 +50,7 @@ No subdomains recorded for this target.
 {% if typosquats %}
 | Spoof Domain | Permutation Type | IP Address | Active MX | Registrar | Registration Date |
 | --- | --- | --- | --- | --- | --- |
-{% for ts in typosquats %}| `{{ ts.spoof_domain }}` | `{{ ts.permutation_type }}` | `{{ ts.ip_address or "-" }}` | {{ "Yes" if ts.has_mx_record else "No" }} | {{ ts.registrar or "Unknown" }} | {{ ts.registration_date or "-" }} |
+{% for ts in typosquats %}| `{{ ts.spoof_domain }}` | `{{ ts.permutation_type }}` | `{{ ts.ip_address or "N/A" }}` | {{ "Yes" if ts.has_mx_record else "No" }} | {{ ts.registrar or "N/A" }} | {{ ts.registration_date or "N/A" }} |
 {% endfor %}
 {% else %}
 No active typosquatting domains detected.

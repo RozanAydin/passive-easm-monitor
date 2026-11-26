@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy import select
 
 from src.collectors.dns_resolver import DNSResolutionResult
@@ -16,6 +18,7 @@ from src.core.database import (
     utc_now,
 )
 from src.core.diff_engine import StateDiffEngine
+from src.core.risk_scorer import score_typosquat
 from src.enrichment.internetdb import InternetDBResult
 
 
@@ -178,6 +181,51 @@ def test_diff_engine_detects_new_ports_cves_ip_change_and_is_idempotent() -> Non
         assert alert_map[("NEW_CVE", "203.0.113.10")] == "CRITICAL"
         assert alert_map[("IP_CHANGE", "app.example.com")] == "MEDIUM"
         assert alert_map[("NEW_PORT", "203.0.113.99")] == "HIGH"
-        assert alert_map[("TYPOSQUAT_ACTIVE", "exmple.com")] == "HIGH"
+        assert alert_map[("TYPOSQUAT_ACTIVE", "exmple.com")] == "MEDIUM"
         assert len(session.scalars(select(TyposquatDomain)).all()) == 1
         assert len(session.scalars(select(Alert)).all()) == 7
+
+
+def test_dynamic_typosquat_severity_scoring_rules() -> None:
+    ref_now = datetime(2026, 11, 26, 0, 0, 0, tzinfo=timezone.utc)
+
+    # CRITICAL: Registered within 90 days AND has active MX
+    assert (
+        score_typosquat(
+            has_a_record=True,
+            has_mx_record=True,
+            registration_date="2026-10-15T00:00:00Z",
+            now=ref_now,
+        )
+        == "CRITICAL"
+    )
+    # HIGH: Active MX, registered > 90 days ago
+    assert (
+        score_typosquat(
+            has_a_record=True,
+            has_mx_record=True,
+            registration_date="2024-01-01T00:00:00Z",
+            now=ref_now,
+        )
+        == "HIGH"
+    )
+    # MEDIUM: Active A/AAAA web IP without MX
+    assert (
+        score_typosquat(
+            has_a_record=True,
+            has_mx_record=False,
+            registration_date="2026-11-01T00:00:00Z",
+            now=ref_now,
+        )
+        == "MEDIUM"
+    )
+    # LOW: Registered > 5 years ago with no active web IP or MX
+    assert (
+        score_typosquat(
+            has_a_record=False,
+            has_mx_record=False,
+            registration_date="2018-01-01T00:00:00Z",
+            now=ref_now,
+        )
+        == "LOW"
+    )

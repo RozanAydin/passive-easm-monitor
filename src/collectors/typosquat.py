@@ -11,6 +11,7 @@ import httpx
 from src.collectors.dns_resolver import AsyncDNSResolver, DNSResolutionResult
 from src.enrichment.sanitizer import redact_text, sanitize_rdap_data
 from src.logger import get_logger
+from src.utils.validators import is_domain_allowlisted
 
 logger = get_logger("collectors.typosquat")
 
@@ -82,7 +83,7 @@ def generate_permutations(domain: str) -> list[PermutationCandidate]:
         if candidate not in seen:
             seen[candidate] = ptype
 
-    # 1. Character omission (requires label length > 2 to avoid 1-char labels unless valid)
+    # 1. Character omission
     if len(label) > 1:
         for idx in range(len(label)):
             _add(label[:idx] + label[idx + 1 :], tld, "omission")
@@ -189,13 +190,27 @@ class TyposquatCollector:
                 if attempt < len(RETRY_DELAYS):
                     await asyncio.sleep(RETRY_DELAYS[attempt])
                     continue
-                logger.debug("RDAP lookup failed for %s: %s", domain, exc)
+                logger.debug(
+                    "RDAP lookup failed for %s (%s: %s)",
+                    domain,
+                    type(exc).__name__,
+                    exc,
+                )
                 return None, None
         return None, None
 
-    async def collect(self, target_domain: str) -> list[ActiveTyposquat]:
-        """Generate permutations, check DNS A/MX, and retrieve sanitized RDAP metadata."""
-        candidates = generate_permutations(target_domain)
+    async def collect(
+        self,
+        target_domain: str,
+        allowlist: list[str] | None = None,
+    ) -> list[ActiveTyposquat]:
+        """Generate permutations, filter allowlist, check DNS A/AAAA/MX, and retrieve RDAP metadata."""
+        exclusions = allowlist or []
+        candidates = [
+            cand
+            for cand in generate_permutations(target_domain)
+            if not is_domain_allowlisted(cand.domain, exclusions)
+        ]
         if not candidates:
             return []
 
@@ -212,7 +227,7 @@ class TyposquatCollector:
         active_candidates: list[tuple[PermutationCandidate, DNSResolutionResult]] = []
         for cand in candidates:
             dns_res = dns_results.get(cand.domain)
-            if dns_res and (dns_res.a_records or dns_res.mx_records):
+            if dns_res and (dns_res.a_records or dns_res.aaaa_records or dns_res.mx_records):
                 active_candidates.append((cand, dns_res))
 
         if not active_candidates:
@@ -245,7 +260,7 @@ class TyposquatCollector:
                 return ActiveTyposquat(
                     spoof_domain=cand.domain,
                     permutation_type=cand.permutation_type,
-                    ip_address=dns_res.a_records[0] if dns_res.a_records else None,
+                    ip_address=dns_res.primary_ip,
                     has_mx_record=bool(dns_res.mx_records),
                     registrar=registrar,
                     registration_date=reg_date,

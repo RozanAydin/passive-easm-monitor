@@ -1,11 +1,13 @@
-"""SQLAlchemy ORM models and database session management (SQLite & PostgreSQL)."""
+"""SQLAlchemy ORM models, SQLite WAL concurrency setup, and target auto-seeding."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import yaml
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -15,9 +17,19 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    event,
+    func,
+    inspect,
+    select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
+
+from src.logger import get_logger
+from src.utils.validators import parse_allowlist_input, validate_and_normalize_domain
+
+logger = get_logger("core.database")
 
 
 def utc_now() -> datetime:
@@ -33,14 +45,32 @@ class Target(Base):
     __tablename__ = "targets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    domain: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    domain: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    allowlist: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    scan_status: Mapped[str] = mapped_column(String(20), default="idle", nullable=False)
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     scan_runs: Mapped[list["ScanRun"]] = relationship(back_populates="target", cascade="all, delete-orphan")
     subdomains: Mapped[list["Subdomain"]] = relationship(back_populates="target", cascade="all, delete-orphan")
     typosquats: Mapped[list["TyposquatDomain"]] = relationship(back_populates="target", cascade="all, delete-orphan")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="target", cascade="all, delete-orphan")
+
+    def get_allowlist(self) -> list[str]:
+        """Return parsed list of allowlisted domains/subdomains."""
+        if not self.allowlist:
+            return []
+        try:
+            data = json.loads(self.allowlist)
+            return [str(x).lower() for x in data] if isinstance(data, list) else []
+        except ValueError:
+            return []
+
+    def set_allowlist(self, items: list[str]) -> None:
+        """Persist validated allowlist entries as JSON text."""
+        self.allowlist = json.dumps(items)
 
 
 class ScanRun(Base):
@@ -137,26 +167,117 @@ def _ensure_sqlite_parent_dir(database_url: str) -> None:
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _configure_sqlite_pragmas(engine: Engine) -> None:
+    """Enable WAL mode and busy timeout for safe concurrent CLI + Web SQLite access."""
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            cursor.execute("PRAGMA busy_timeout=30000;")
+            cursor.execute("PRAGMA foreign_keys=ON;")
+        finally:
+            cursor.close()
+
+
 class DatabaseManager:
-    """Manages SQLAlchemy engine, schema initialization, and sessions."""
+    """Manages SQLAlchemy engine, WAL mode, schema migrations, and sessions."""
 
     def __init__(self, database_url: str) -> None:
         _ensure_sqlite_parent_dir(database_url)
-        connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+        is_sqlite = database_url.startswith("sqlite")
+        connect_args = {"check_same_thread": False, "timeout": 30} if is_sqlite else {}
         self.engine: Engine = create_engine(
             database_url,
             connect_args=connect_args,
             future=True,
         )
+        if is_sqlite:
+            _configure_sqlite_pragmas(self.engine)
+
         self.SessionLocal = sessionmaker(
             bind=self.engine,
             autoflush=False,
             expire_on_commit=False,
         )
 
+    def _migrate_targets_columns(self) -> None:
+        """Safely add new Target columns to existing SQLite databases if missing."""
+        inspector = inspect(self.engine)
+        if not inspector.has_table("targets"):
+            return
+        existing_cols = {col["name"] for col in inspector.get_columns("targets")}
+        migrations: list[str] = []
+        if "allowlist" not in existing_cols:
+            migrations.append("ALTER TABLE targets ADD COLUMN allowlist TEXT NOT NULL DEFAULT '[]'")
+        if "scan_status" not in existing_cols:
+            migrations.append("ALTER TABLE targets ADD COLUMN scan_status VARCHAR(20) NOT NULL DEFAULT 'idle'")
+        if "last_scanned_at" not in existing_cols:
+            migrations.append("ALTER TABLE targets ADD COLUMN last_scanned_at DATETIME")
+        if "last_error" not in existing_cols:
+            migrations.append("ALTER TABLE targets ADD COLUMN last_error TEXT")
+
+        if migrations:
+            with self.engine.begin() as conn:
+                for stmt in migrations:
+                    conn.execute(text(stmt))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_targets_domain ON targets (domain)"))
+
     def init_db(self) -> None:
-        """Create all tables if they do not exist."""
+        """Create all tables and apply non-destructive migrations."""
         Base.metadata.create_all(bind=self.engine)
+        self._migrate_targets_columns()
+
+    def seed_initial_targets(
+        self,
+        targets_yaml_path: str | Path = "config/targets.yaml",
+        fallback_config_path: str | Path = "config/config.yaml",
+    ) -> int:
+        """Seed initial targets from config/targets.yaml when targets table is empty."""
+        with self.get_session() as session:
+            count = session.scalar(select(func.count(Target.id))) or 0
+            if count > 0:
+                return 0
+
+            seed_entries: list[dict] = []
+            targets_file = Path(targets_yaml_path)
+            fallback_file = Path(fallback_config_path)
+
+            if targets_file.exists():
+                raw = yaml.safe_load(targets_file.read_text(encoding="utf-8")) or {}
+                seed_entries = raw.get("targets", []) if isinstance(raw, dict) else []
+            elif fallback_file.exists():
+                raw = yaml.safe_load(fallback_file.read_text(encoding="utf-8")) or {}
+                seed_entries = raw.get("targets", []) if isinstance(raw, dict) else []
+
+            if not seed_entries:
+                seed_entries = [{"domain": "example.com", "is_active": True, "allowlist": []}]
+
+            inserted = 0
+            for entry in seed_entries:
+                if not isinstance(entry, dict) or not entry.get("domain"):
+                    continue
+                domain = validate_and_normalize_domain(str(entry["domain"]))
+                raw_allow = entry.get("allowlist") or entry.get("exclude_subdomains") or []
+                allowlist = parse_allowlist_input(raw_allow)
+                is_active = bool(entry.get("is_active", True))
+
+                existing = session.scalars(select(Target).where(Target.domain == domain)).first()
+                if existing is None:
+                    target = Target(
+                        domain=domain,
+                        is_active=is_active,
+                        scan_status="idle",
+                    )
+                    target.set_allowlist(allowlist)
+                    session.add(target)
+                    inserted += 1
+
+            session.commit()
+            if inserted:
+                logger.info("Seeded %d initial target(s) into SQLite database.", inserted)
+            return inserted
 
     def get_session(self) -> Session:
         """Return a new SQLAlchemy session."""

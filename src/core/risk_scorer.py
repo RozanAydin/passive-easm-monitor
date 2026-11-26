@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Iterable
 
 SEVERITY_RANK: dict[str, int] = {
@@ -15,10 +16,40 @@ DEFAULT_SENSITIVE_PORTS: frozenset[int] = frozenset(
     {21, 22, 23, 25, 445, 1433, 3306, 3389, 5432, 6379, 9200, 27017}
 )
 
+RECENT_REG_DAYS = 90
+OLD_REG_DAYS = 365 * 5
+
 
 def meets_severity_threshold(severity: str, min_severity: str) -> bool:
     """Return True if severity >= min_severity according to the severity hierarchy."""
     return SEVERITY_RANK.get(severity.upper(), 0) >= SEVERITY_RANK.get(min_severity.upper(), 0)
+
+
+def _parse_registration_age_days(
+    registration_date: str | None,
+    now: datetime | None = None,
+) -> int | None:
+    """Parse an RDAP ISO registration timestamp and return age in days."""
+    if not registration_date:
+        return None
+    raw = registration_date.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    delta = ref - parsed
+    return max(0, delta.days)
 
 
 def score_new_subdomain(
@@ -56,10 +87,32 @@ def score_new_cves() -> str:
     return "CRITICAL"
 
 
-def score_typosquat(has_a_record: bool, has_mx_record: bool) -> str:
-    """Classify severity of an active typosquatting domain."""
-    if has_mx_record or has_a_record:
+def score_typosquat(
+    has_a_record: bool,
+    has_mx_record: bool,
+    registration_date: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Classify severity of a typosquatting domain based on DNS activity and registration age.
+
+    Rules:
+    - CRITICAL: Registered within the last 90 days AND has active MX records.
+    - HIGH: Active MX records (potential phishing / BEC risk).
+    - MEDIUM: Active A/AAAA web IP without MX records.
+    - LOW: Registered > 5 years ago with no active web IP or MX (or inactive DNS).
+    """
+    age_days = _parse_registration_age_days(registration_date, now=now)
+
+    if has_mx_record:
+        if age_days is not None and age_days <= RECENT_REG_DAYS:
+            return "CRITICAL"
         return "HIGH"
+
+    if has_a_record:
+        return "MEDIUM"
+
+    if age_days is not None and age_days > OLD_REG_DAYS:
+        return "LOW"
     return "LOW"
 
 
@@ -75,28 +128,37 @@ def recommend_action(
     cves: list[str] | None = None,
     has_mx_record: bool = False,
 ) -> str:
-    """Generate an actionable remediation recommendation for an IoC / alert."""
+    """Generate a professional English remediation recommendation for an IoC / alert."""
     cat = category.upper()
     if cat == "TYPOSQUAT_ACTIVE":
         if has_mx_record:
             return (
-                f"Ajukan takedown domain {indicator} dan blokir domain pengirim pada Secure Email Gateway."
+                f"Initiate a domain takedown request for {indicator} and block sender traffic "
+                "from this domain on your Secure Email Gateway (SEG)."
             )
         return (
-            f"Pantau domain tiruan {indicator}, verifikasi kepemilikan, dan pertimbangkan pemblokiran pada DNS/web proxy."
+            f"Monitor lookalike domain {indicator}, verify brand ownership, and consider "
+            "blocking resolution on corporate DNS resolvers and web proxies."
         )
     if cat in {"NEW_PORT", "NEW_SUBDOMAIN"} and sensitive_ports_found:
         ports_str = ", ".join(str(p) for p in sorted(sensitive_ports_found))
         return (
-            f"Verifikasi kepemilikan aset {indicator} dan batasi akses port sensitif ({ports_str}) dari internet publik."
+            f"Verify ownership of {indicator} and restrict public internet exposure on "
+            f"sensitive port(s) ({ports_str}) via firewall or security group rules."
         )
     if cat == "NEW_CVE" or cves:
-        cve_str = ", ".join(cves[:5]) if cves else "terkait"
+        cve_str = ", ".join(cves[:5]) if cves else "associated vulnerabilities"
         return (
-            f"Lakukan patch management dan verifikasi kerentanan ({cve_str}) pada aset {indicator}."
+            f"Prioritize patch management and validate remediation for ({cve_str}) on {indicator}."
         )
     if cat == "IP_CHANGE":
-        return f"Konfirmasi legitimasi perubahan DNS A record untuk {indicator} guna mencegah subdomain takeover."
+        return (
+            f"Confirm legitimacy of the DNS IP change for {indicator} to rule out "
+            "unauthorized DNS modification or subdomain takeover."
+        )
     if cat == "NEW_SUBDOMAIN":
-        return f"Verifikasi aset {indicator} dalam inventaris CMDB dan pastikan konfigurasi keamanan standar diterapkan."
-    return f"Investigasi temuan {cat} pada indikator {indicator}."
+        return (
+            f"Verify {indicator} against your asset inventory (CMDB) and ensure baseline "
+            "security hardening and TLS policies are enforced."
+        )
+    return f"Investigate {cat} finding associated with indicator {indicator}."

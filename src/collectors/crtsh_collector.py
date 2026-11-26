@@ -12,8 +12,9 @@ from src.logger import get_logger
 
 logger = get_logger("collectors.crtsh")
 
-CRTSH_URL = "https://crt.sh/?q=%25.{domain}&output=json"
+CRTSH_BASE_URL = "https://crt.sh/"
 RETRY_DELAYS = (2, 4, 8)
+CRTSH_DEFAULT_TIMEOUT_SEC = 40
 
 
 def extract_subdomains_from_crtsh_entries(
@@ -41,7 +42,6 @@ def extract_subdomains_from_crtsh_entries(
             candidate = raw.strip().lower().rstrip(".")
             if not candidate:
                 continue
-            # Clean wildcard entries (*.example.com -> example.com, *.sub.example.com -> sub.example.com)
             while candidate.startswith("*."):
                 candidate = candidate[2:]
             if not candidate or "*" in candidate or " " in candidate:
@@ -60,11 +60,11 @@ class CrtShCollector:
 
     def __init__(
         self,
-        timeout_sec: int = 10,
+        timeout_sec: int = CRTSH_DEFAULT_TIMEOUT_SEC,
         rate_limit_delay_sec: float = 0.5,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self.timeout_sec = timeout_sec
+        self.timeout_sec = max(timeout_sec, CRTSH_DEFAULT_TIMEOUT_SEC) if timeout_sec == 10 else timeout_sec
         self.rate_limit_delay_sec = rate_limit_delay_sec
         self._external_client = client
 
@@ -75,7 +75,11 @@ class CrtShCollector:
     ) -> list[str]:
         """Fetch and clean subdomains for a root domain from crt.sh."""
         root = domain.strip().lower().rstrip(".")
-        url = CRTSH_URL.format(domain=root)
+        params = {
+            "q": f"%.{root}",
+            "output": "json",
+            "exclude": "expired",
+        }
         active_client = self._external_client
         owns_client = active_client is None
         if owns_client:
@@ -90,13 +94,22 @@ class CrtShCollector:
                     if self.rate_limit_delay_sec > 0:
                         await asyncio.sleep(self.rate_limit_delay_sec)
                     logger.info("Querying crt.sh for domain %s (attempt %d)", root, attempt + 1)
-                    response = await active_client.get(url)
+                    response = await active_client.get(CRTSH_BASE_URL, params=params)
                     if response.status_code == 200:
                         try:
                             data = response.json()
                         except ValueError as exc:
-                            logger.error("Invalid JSON returned by crt.sh for %s: %s", root, exc)
-                            return [root] if not is_subdomain_excluded(root, exclude_subdomains or []) else []
+                            logger.error(
+                                "Invalid JSON returned by crt.sh for %s (%s: %s)",
+                                root,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            return (
+                                [root]
+                                if not is_subdomain_excluded(root, exclude_subdomains or [])
+                                else []
+                            )
                         if not isinstance(data, list):
                             logger.warning("Unexpected crt.sh response shape for %s", root)
                             return [root]
@@ -132,17 +145,18 @@ class CrtShCollector:
                     )
                     break
                 except httpx.RequestError as exc:
+                    err_detail = f"{type(exc).__name__}: {exc}".strip()
                     if attempt < len(RETRY_DELAYS):
                         delay = RETRY_DELAYS[attempt]
                         logger.warning(
                             "crt.sh request error for %s (%s); retrying in %ds",
                             root,
-                            exc,
+                            err_detail,
                             delay,
                         )
                         await asyncio.sleep(delay)
                         continue
-                    logger.error("crt.sh request failed for %s: %s", root, exc)
+                    logger.error("crt.sh request failed for %s (%s)", root, err_detail)
                     break
         finally:
             if owns_client and active_client is not None:

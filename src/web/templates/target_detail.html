@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}{{ target.domain }} - Scan Results | Passive EASM Monitor{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <!-- Header & Controls -->
+  <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 rounded-xl border border-slate-800 bg-socpanel p-6 shadow-lg">
+    <div>
+      <div class="flex items-center gap-3">
+        <a href="/" class="text-xs text-slate-400 hover:text-white">&larr; Back to Targets</a>
+        <span class="text-slate-700">|</span>
+        <span class="text-xs uppercase tracking-wider text-slate-400">Target Intelligence</span>
+      </div>
+      <div class="flex items-center gap-3 mt-2">
+        <h1 class="text-2xl font-bold text-white font-mono">{{ target.domain }}</h1>
+        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium
+          {% if target.scan_status == 'running' %}bg-amber-500/15 text-amber-300 border border-amber-500/30
+          {% elif target.scan_status == 'completed' %}bg-sky-500/15 text-sky-300 border border-sky-500/30
+          {% elif target.scan_status == 'failed' %}bg-rose-500/15 text-rose-300 border border-rose-500/30
+          {% else %}bg-slate-700/40 text-slate-300 border border-slate-600/40{% endif %}">
+          {{ target.scan_status }}
+        </span>
+      </div>
+      <p class="text-xs text-slate-400 mt-1">
+        Last Scanned: {{ target.last_scanned_at or "N/A" }}
+        {% if target.allowlist %}
+        &bull; Allowlist: <span class="text-slate-300">{{ target.allowlist | join(", ") }}</span>
+        {% endif %}
+      </p>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-3">
+      {% if scan_runs %}
+      <form method="get" action="/targets/{{ target.domain }}" class="flex items-center gap-2">
+        <label for="run-select" class="text-xs text-slate-400">Scan Run:</label>
+        <select
+          id="run-select"
+          name="run_id"
+          onchange="this.form.submit()"
+          class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
+        >
+          {% for r in scan_runs %}
+          <option value="{{ r.id }}" {% if r.id == selected_run_id %}selected{% endif %}>
+            Run #{{ r.id }} ({{ r.status }}) - {{ r.started_at }} [{{ r.new_findings_count }} alerts]
+          </option>
+          {% endfor %}
+        </select>
+      </form>
+      {% endif %}
+
+      {% if selected_run_id %}
+      <div class="flex items-center gap-2">
+        <a href="/api/reports/{{ selected_run_id }}/md" class="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-white transition">
+          Download MD
+        </a>
+        <a href="/api/reports/{{ selected_run_id }}/json" class="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-white transition">
+          IoC JSON
+        </a>
+        <a href="/api/reports/{{ selected_run_id }}/csv" class="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-white transition">
+          IoC CSV
+        </a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if report %}
+  <!-- Summary KPI Cards -->
+  <div class="grid grid-cols-2 sm:grid-cols-5 gap-4">
+    <div class="rounded-xl border border-rose-500/30 bg-rose-950/20 p-4">
+      <div class="text-xs font-medium text-rose-300 uppercase">CRITICAL</div>
+      <div class="text-2xl font-bold text-rose-400 mt-1">{{ report.severity_counts.CRITICAL }}</div>
+    </div>
+    <div class="rounded-xl border border-orange-500/30 bg-orange-950/20 p-4">
+      <div class="text-xs font-medium text-orange-300 uppercase">HIGH</div>
+      <div class="text-2xl font-bold text-orange-400 mt-1">{{ report.severity_counts.HIGH }}</div>
+    </div>
+    <div class="rounded-xl border border-amber-500/30 bg-amber-950/20 p-4">
+      <div class="text-xs font-medium text-amber-300 uppercase">MEDIUM</div>
+      <div class="text-2xl font-bold text-amber-400 mt-1">{{ report.severity_counts.MEDIUM }}</div>
+    </div>
+    <div class="rounded-xl border border-sky-500/30 bg-sky-950/20 p-4">
+      <div class="text-xs font-medium text-sky-300 uppercase">LOW</div>
+      <div class="text-2xl font-bold text-sky-400 mt-1">{{ report.severity_counts.LOW }}</div>
+    </div>
+    <div class="rounded-xl border border-slate-700 bg-socpanel p-4 col-span-2 sm:col-span-1">
+      <div class="text-xs font-medium text-slate-400 uppercase">Total Subdomains</div>
+      <div class="text-2xl font-bold text-white mt-1">{{ report.total_subdomains }}</div>
+    </div>
+  </div>
+
+  <!-- Tab Navigation -->
+  <div class="border-b border-slate-800 flex gap-2">
+    <button type="button" onclick="switchTab('alerts')" id="tab-btn-alerts" class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-emerald-500 text-emerald-400">
+      Delta Alerts ({{ report.alerts | length }})
+    </button>
+    <button type="button" onclick="switchTab('subdomains')" id="tab-btn-subdomains" class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-white">
+      Subdomain Inventory ({{ report.subdomains | length }})
+    </button>
+    <button type="button" onclick="switchTab('typosquats')" id="tab-btn-typosquats" class="tab-btn px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-white">
+      Typosquatting &amp; RDAP ({{ report.typosquats | length }})
+    </button>
+  </div>
+
+  <!-- Tab 1: Delta Alerts -->
+  <section id="tab-panel-alerts" class="tab-panel rounded-xl border border-slate-800 bg-socpanel overflow-hidden shadow-lg">
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-slate-900/70 text-xs uppercase text-slate-400 border-b border-slate-800">
+          <tr>
+            <th class="px-5 py-3">Severity</th>
+            <th class="px-4 py-3">Category</th>
+            <th class="px-4 py-3">Indicator</th>
+            <th class="px-5 py-3">Description</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for alert in report.alerts %}
+          <tr class="hover:bg-slate-900/40">
+            <td class="px-5 py-3.5">
+              <span class="inline-flex rounded px-2 py-0.5 text-xs font-semibold
+                {% if alert.severity == 'CRITICAL' %}bg-rose-500/20 text-rose-300 border border-rose-500/30
+                {% elif alert.severity == 'HIGH' %}bg-orange-500/20 text-orange-300 border border-orange-500/30
+                {% elif alert.severity == 'MEDIUM' %}bg-amber-500/20 text-amber-300 border border-amber-500/30
+                {% else %}bg-sky-500/20 text-sky-300 border border-sky-500/30{% endif %}">
+                {{ alert.severity }}
+              </span>
+            </td>
+            <td class="px-4 py-3.5 font-mono text-xs text-slate-300">{{ alert.category }}</td>
+            <td class="px-4 py-3.5 font-mono text-xs text-white">{{ alert.indicator }}</td>
+            <td class="px-5 py-3.5 text-xs text-slate-300">{{ alert.description }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="4" class="px-6 py-8 text-center text-sm text-slate-400">
+              No new delta alerts detected in Run #{{ selected_run_id }}.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Tab 2: Subdomain Attack Surface Inventory -->
+  <section id="tab-panel-subdomains" class="tab-panel hidden rounded-xl border border-slate-800 bg-socpanel overflow-hidden shadow-lg">
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-slate-900/70 text-xs uppercase text-slate-400 border-b border-slate-800">
+          <tr>
+            <th class="px-5 py-3">FQDN</th>
+            <th class="px-4 py-3">Resolving</th>
+            <th class="px-4 py-3">IP Address</th>
+            <th class="px-4 py-3">CNAME</th>
+            <th class="px-4 py-3">Open Ports</th>
+            <th class="px-5 py-3">CVEs</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for sub in report.subdomains %}
+          <tr class="hover:bg-slate-900/40">
+            <td class="px-5 py-3.5 font-mono text-xs text-white">{{ sub.fqdn }}</td>
+            <td class="px-4 py-3.5 text-xs">
+              {% if sub.is_resolving %}
+              <span class="text-emerald-400">Yes</span>
+              {% else %}
+              <span class="text-slate-500">NXDOMAIN</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3.5 font-mono text-xs text-slate-300">{{ sub.ip_address or "N/A" }}</td>
+            <td class="px-4 py-3.5 font-mono text-xs text-slate-400">{{ sub.cname_record or "N/A" }}</td>
+            <td class="px-4 py-3.5 font-mono text-xs text-amber-300">
+              {{ sub.open_ports | join(", ") if sub.open_ports else "N/A" }}
+            </td>
+            <td class="px-5 py-3.5 font-mono text-xs text-rose-300">
+              {{ sub.cves | join(", ") if sub.cves else "N/A" }}
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-sm text-slate-400">
+              No subdomains recorded for this target yet.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Tab 3: Typosquatting & RDAP -->
+  <section id="tab-panel-typosquats" class="tab-panel hidden rounded-xl border border-slate-800 bg-socpanel overflow-hidden shadow-lg">
+    <div class="overflow-x-auto">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-slate-900/70 text-xs uppercase text-slate-400 border-b border-slate-800">
+          <tr>
+            <th class="px-5 py-3">Spoof Domain</th>
+            <th class="px-4 py-3">Permutation Type</th>
+            <th class="px-4 py-3">IP Address</th>
+            <th class="px-4 py-3">Active MX</th>
+            <th class="px-4 py-3">Registrar</th>
+            <th class="px-5 py-3">Registration Date</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for ts in report.typosquats %}
+          <tr class="hover:bg-slate-900/40">
+            <td class="px-5 py-3.5 font-mono text-xs text-white">{{ ts.spoof_domain }}</td>
+            <td class="px-4 py-3.5 font-mono text-xs text-slate-300">{{ ts.permutation_type }}</td>
+            <td class="px-4 py-3.5 font-mono text-xs text-slate-300">{{ ts.ip_address or "N/A" }}</td>
+            <td class="px-4 py-3.5 text-xs">
+              {% if ts.has_mx_record %}
+              <span class="text-rose-400 font-medium">Yes</span>
+              {% else %}
+              <span class="text-slate-400">No</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-3.5 text-xs text-slate-300">{{ ts.registrar or "N/A" }}</td>
+            <td class="px-5 py-3.5 font-mono text-xs text-slate-400">{{ ts.registration_date or "N/A" }}</td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-sm text-slate-400">
+              No active typosquatting domains detected.
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% else %}
+  <div class="rounded-xl border border-slate-800 bg-socpanel p-8 text-center">
+    <p class="text-sm text-slate-300">No scan runs available yet for <strong>{{ target.domain }}</strong>.</p>
+    <p class="text-xs text-slate-500 mt-1">Return to the dashboard and click <strong>Scan Now</strong> to initiate a passive scan.</p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function switchTab(name) {
+    document.querySelectorAll('.tab-panel').forEach((panel) => {
+      panel.classList.add('hidden');
+    });
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.classList.remove('border-emerald-500', 'text-emerald-400');
+      btn.classList.add('border-transparent', 'text-slate-400');
+    });
+    document.getElementById(`tab-panel-${name}`).classList.remove('hidden');
+    const activeBtn = document.getElementById(`tab-btn-${name}`);
+    activeBtn.classList.add('border-emerald-500', 'text-emerald-400');
+    activeBtn.classList.remove('border-transparent', 'text-slate-400');
+  }
+</script>
+{% endblock %}

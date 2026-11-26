@@ -1,4 +1,4 @@
-"""CLI entry point and pipeline orchestrator for the Passive EASM & Brand Threat Monitor."""
+"""CLI entry point and pipeline orchestrator for the Hybrid EASM & Brand Threat Monitor."""
 
 from __future__ import annotations
 
@@ -12,130 +12,47 @@ from typing import Sequence
 from sqlalchemy import select
 
 from src.collectors.crtsh_collector import CrtShCollector
-from src.collectors.dns_resolver import AsyncDNSResolver, DNSResolutionResult
-from src.collectors.typosquat import ActiveTyposquat, TyposquatCollector
-from src.config_loader import AppConfig, SecretsConfig, TargetConfig, load_config
-from src.core.database import DatabaseManager, ScanRun, Target, utc_now
-from src.core.diff_engine import DiffSummary, StateDiffEngine
-from src.enrichment.internetdb import InternetDBClient, InternetDBResult
+from src.collectors.dns_resolver import AsyncDNSResolver
+from src.collectors.typosquat import TyposquatCollector
+from src.config_loader import AppConfig, SecretsConfig, load_config
+from src.core.database import DatabaseManager, Target
+from src.core.diff_engine import DiffSummary
+from src.core.scanner import execute_target_scan, upsert_target
+from src.enrichment.internetdb import InternetDBClient
 from src.logger import get_logger, setup_logging
 from src.outputs.notifier import WebhookNotifier
 from src.outputs.reporter import IntelligenceReporter
+from src.utils.validators import validate_and_normalize_domain
 
 logger = get_logger("main")
 
 
-def _get_or_create_target(session, domain: str) -> Target:
-    target = session.scalars(select(Target).where(Target.domain == domain)).first()
-    if target is None:
-        target = Target(domain=domain, is_active=True)
-        session.add(target)
-        session.flush()
-    return target
-
-
-async def process_target(
-    target_cfg: TargetConfig,
-    app_config: AppConfig,
-    db_manager: DatabaseManager,
-    crtsh_collector: CrtShCollector,
-    dns_resolver: AsyncDNSResolver,
-    typosquat_collector: TyposquatCollector,
-    internetdb_client: InternetDBClient,
-    diff_engine: StateDiffEngine,
-    notifier: WebhookNotifier,
-    reporter: IntelligenceReporter,
-    skip_notify: bool = False,
-    per_target_subdir: bool = False,
-) -> DiffSummary:
-    """Execute the full passive EASM & brand monitoring pipeline for a single target."""
-    logger.info("Starting passive scan pipeline for target: %s", target_cfg.domain)
-
-    with db_manager.get_session() as session:
-        target = _get_or_create_target(session, target_cfg.domain)
-        scan_run = ScanRun(
-            target_id=target.id,
-            started_at=utc_now(),
-            status="RUNNING",
-        )
-        session.add(scan_run)
-        session.commit()
-        target_id = target.id
-        scan_run_id = scan_run.id
-
-    try:
-        # Module 1 & 2: Passive Collection
-        dns_results: dict[str, DNSResolutionResult] = {}
-        if target_cfg.enable_easm:
-            subdomains = await crtsh_collector.collect(
-                target_cfg.domain,
-                exclude_subdomains=target_cfg.exclude_subdomains,
-            )
-            if subdomains:
-                dns_results = await dns_resolver.resolve_many(subdomains)
-
-        typosquats: list[ActiveTyposquat] = []
-        if target_cfg.enable_typosquat:
-            typosquats = await typosquat_collector.collect(target_cfg.domain)
-
-        # Module 3: Passive IP Enrichment (IPv4s from resolved subdomains)
-        unique_ipv4s = sorted(
-            {
-                ip
-                for res in dns_results.values()
-                for ip in res.a_records
-                if ip
-            }
-        )
-        enrichments: dict[str, InternetDBResult] = {}
-        if unique_ipv4s:
-            enrichments = await internetdb_client.enrich_ips(unique_ipv4s)
-
-        # Module 4 & 5: Diffing, Alerting, and Reporting
+def _init_db_and_seed(
+    db_url: str,
+    app_config: AppConfig | None = None,
+    targets_yaml_path: str | Path = "config/targets.yaml",
+    fallback_config_path: str | Path = "config/config.yaml",
+) -> DatabaseManager:
+    db_manager = DatabaseManager(db_url)
+    db_manager.init_db()
+    if app_config and app_config.targets:
+        # Ensure any targets explicitly configured in the passed AppConfig are present
         with db_manager.get_session() as session:
-            target = session.get(Target, target_id)
-            scan_run = session.get(ScanRun, scan_run_id)
-            assert target is not None and scan_run is not None
-
-            summary = diff_engine.process_scan(
-                session=session,
-                target=target,
-                current_run=scan_run,
-                dns_results=dns_results,
-                enrichments=enrichments,
-                typosquats=typosquats,
-            )
-
-            if not skip_notify:
-                await notifier.notify_alerts(summary.alerts, target.domain)
-
-            session.commit()
-
-            reporter.export_reports(
-                session=session,
-                target=target,
-                scan_run=scan_run,
-                export_formats=app_config.reporting.export_formats,
-                per_target_subdir=per_target_subdir,
-            )
-
-        logger.info(
-            "Completed scan for %s (run_id=%d): %d findings.",
-            target_cfg.domain,
-            scan_run_id,
-            len(summary.alerts),
+            existing_count = len(session.scalars(select(Target.id)).all())
+        if existing_count == 0:
+            for t_cfg in app_config.targets:
+                upsert_target(
+                    db_manager,
+                    domain=t_cfg.domain,
+                    allowlist=t_cfg.exclude_subdomains,
+                    is_active=True,
+                )
+    else:
+        db_manager.seed_initial_targets(
+            targets_yaml_path=targets_yaml_path,
+            fallback_config_path=fallback_config_path,
         )
-        return summary
-
-    except Exception as exc:
-        logger.exception("Scan failed for target %s (run_id=%d): %s", target_cfg.domain, scan_run_id, exc)
-        with db_manager.get_session() as session:
-            failed_run = session.get(ScanRun, scan_run_id)
-            if failed_run is not None:
-                failed_run.status = "FAILED"
-                failed_run.finished_at = utc_now()
-                session.commit()
-        raise
+    return db_manager
 
 
 async def run_pipeline(
@@ -150,66 +67,106 @@ async def run_pipeline(
     notifier: WebhookNotifier | None = None,
     reporter: IntelligenceReporter | None = None,
 ) -> list[DiffSummary]:
-    """Run the monitoring pipeline across all configured (or filtered) targets."""
-    db_manager = DatabaseManager(app_config.database.url)
-    db_manager.init_db()
+    """Run the monitoring pipeline for a specific target or all active SQLite targets."""
+    db_manager = _init_db_and_seed(app_config.database.url, app_config=app_config)
 
-    settings = app_config.collector_settings
-    active_dns = dns_resolver or AsyncDNSResolver(
-        concurrency=settings.dns_concurrency,
-        timeout_sec=settings.request_timeout_sec,
-    )
-    active_crtsh = crtsh_collector or CrtShCollector(
-        timeout_sec=settings.request_timeout_sec,
-        rate_limit_delay_sec=settings.rate_limit_delay_sec,
-    )
-    active_typosquat = typosquat_collector or TyposquatCollector(
-        dns_resolver=active_dns,
-        timeout_sec=settings.request_timeout_sec,
-        rate_limit_delay_sec=settings.rate_limit_delay_sec,
-    )
-    active_internetdb = internetdb_client or InternetDBClient(
-        timeout_sec=settings.request_timeout_sec,
-        rate_limit_delay_sec=settings.rate_limit_delay_sec,
-    )
-    diff_engine = StateDiffEngine(sensitive_ports=settings.sensitive_ports)
-    active_notifier = notifier or WebhookNotifier(
-        alerting_config=app_config.alerting,
-        secrets=secrets,
-        timeout_sec=settings.request_timeout_sec,
-    )
-    active_reporter = reporter or IntelligenceReporter(
-        output_dir=app_config.reporting.output_dir,
-        sensitive_ports=settings.sensitive_ports,
-    )
+    cfg_map = {t.domain: t for t in app_config.targets}
 
-    targets = app_config.targets
     if target_filter:
-        normalized_filter = target_filter.strip().lower().rstrip(".")
-        targets = [t for t in targets if t.domain == normalized_filter]
-        if not targets:
-            raise ValueError(f"Requested target '{target_filter}' is not configured in config.yaml.")
+        normalized_domain = validate_and_normalize_domain(target_filter)
+        target_cfg = cfg_map.get(normalized_domain)
+        target = upsert_target(
+            db_manager,
+            domain=normalized_domain,
+            allowlist=target_cfg.exclude_subdomains if target_cfg else None,
+            is_active=True,
+        )
+        targets_to_scan = [target]
+    else:
+        with db_manager.get_session() as session:
+            targets_to_scan = list(
+                session.scalars(
+                    select(Target).where(Target.is_active.is_(True)).order_by(Target.id.asc())
+                ).all()
+            )
 
-    multi_target = len(targets) > 1
+    if not targets_to_scan:
+        logger.warning("No active targets found in database. Nothing to scan.")
+        return []
+
     summaries: list[DiffSummary] = []
-    for target_cfg in targets:
-        summary = await process_target(
-            target_cfg=target_cfg,
+    for target in targets_to_scan:
+        target_cfg = cfg_map.get(target.domain)
+        summary = await execute_target_scan(
+            target_id=target.id,
             app_config=app_config,
+            secrets=secrets,
             db_manager=db_manager,
-            crtsh_collector=active_crtsh,
-            dns_resolver=active_dns,
-            typosquat_collector=active_typosquat,
-            internetdb_client=active_internetdb,
-            diff_engine=diff_engine,
-            notifier=active_notifier,
-            reporter=active_reporter,
             skip_notify=skip_notify,
-            per_target_subdir=multi_target,
+            enable_easm=target_cfg.enable_easm if target_cfg else True,
+            enable_typosquat=target_cfg.enable_typosquat if target_cfg else True,
+            crtsh_collector=crtsh_collector,
+            dns_resolver=dns_resolver,
+            typosquat_collector=typosquat_collector,
+            internetdb_client=internetdb_client,
+            notifier=notifier,
+            reporter=reporter,
         )
         summaries.append(summary)
 
     return summaries
+
+
+def list_targets_table(db_manager: DatabaseManager) -> str:
+    """Return a clean formatted table of all registered targets in SQLite."""
+    with db_manager.get_session() as session:
+        targets = list(session.scalars(select(Target).order_by(Target.id.asc())).all())
+
+    if not targets:
+        return "No targets registered in database."
+
+    headers = ("ID", "Domain", "Active", "Scan Status", "Last Scanned (UTC)", "Allowlist")
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for t in targets:
+        last_ts = (
+            t.last_scanned_at.strftime("%Y-%m-%d %H:%M:%S")
+            if t.last_scanned_at
+            else "N/A"
+        )
+        allow = ", ".join(t.get_allowlist()) if t.get_allowlist() else "-"
+        rows.append(
+            (
+                str(t.id),
+                t.domain,
+                "Yes" if t.is_active else "No",
+                t.scan_status,
+                last_ts,
+                allow,
+            )
+        )
+
+    widths = [
+        max(len(headers[i]), *(len(r[i]) for r in rows))
+        for i in range(len(headers))
+    ]
+    fmt = " | ".join(f"{{:<{w}}}" for w in widths)
+    sep = "-+-".join("-" * w for w in widths)
+    lines = [fmt.format(*headers), sep]
+    for r in rows:
+        lines.append(fmt.format(*r))
+    return "\n".join(lines)
+
+
+def remove_target_by_domain(db_manager: DatabaseManager, domain: str) -> bool:
+    """Validate domain and delete it from the SQLite targets table."""
+    normalized = validate_and_normalize_domain(domain)
+    with db_manager.get_session() as session:
+        target = session.scalars(select(Target).where(Target.domain == normalized)).first()
+        if target is None:
+            return False
+        session.delete(target)
+        session.commit()
+        return True
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -226,11 +183,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=".env",
         help="Path to .env secrets file (default: .env)",
     )
-    parser.add_argument(
+
+    action_group = parser.add_mutually_exclusive_group()
+    action_group.add_argument(
         "--target",
         default=None,
-        help="Optional single target domain from config.yaml to scan",
+        help="Validate, upsert into SQLite, and scan a single target domain",
     )
+    action_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Scan all active targets in SQLite (default behavior)",
+    )
+    action_group.add_argument(
+        "--list-targets",
+        action="store_true",
+        help="List all registered targets, status, and last scan timestamps",
+    )
+    action_group.add_argument(
+        "--remove-target",
+        default=None,
+        help="Remove a registered target domain from the database",
+    )
+
     parser.add_argument(
         "--skip-notify",
         action="store_true",
@@ -257,6 +232,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         app_config, secrets = load_config(config_path=args.config, env_path=args.env)
+
+        if args.list_targets:
+            db_manager = _init_db_and_seed(app_config.database.url, app_config=app_config)
+            print(list_targets_table(db_manager))
+            return 0
+
+        if args.remove_target:
+            db_manager = _init_db_and_seed(app_config.database.url, app_config=app_config)
+            removed = remove_target_by_domain(db_manager, args.remove_target)
+            if removed:
+                logger.info("Removed target '%s' from database.", args.remove_target)
+                print(f"Removed target '{validate_and_normalize_domain(args.remove_target)}'.")
+                return 0
+            logger.warning("Target '%s' was not found in database.", args.remove_target)
+            print(f"Target '{args.remove_target}' not found in database.", file=sys.stderr)
+            return 1
+
         asyncio.run(
             run_pipeline(
                 app_config=app_config,
@@ -267,7 +259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except Exception as exc:
-        logger.error("Execution terminated with error: %s", exc)
+        logger.error("Execution terminated with error (%s: %s)", type(exc).__name__, exc)
         return 1
 
 

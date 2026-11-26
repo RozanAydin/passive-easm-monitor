@@ -158,10 +158,12 @@ async def test_full_end_to_end_pipeline_creates_reports_and_notifies(tmp_path: P
     assert summary.total_subdomains == 3  # example.com, orphan.example.com, staging-api.example.com (dev-sandbox excluded)
 
     md_report = reports_dir / "executive_report.md"
+    per_run_md = reports_dir / "example.com" / f"run_{summary.scan_run_id}_executive_report.md"
     ioc_json_file = reports_dir / "ioc_feed.json"
     ioc_csv_file = reports_dir / "ioc_feed.csv"
 
     assert md_report.exists()
+    assert per_run_md.exists()
     assert ioc_json_file.exists()
     assert ioc_csv_file.exists()
 
@@ -169,6 +171,8 @@ async def test_full_end_to_end_pipeline_creates_reports_and_notifies(tmp_path: P
     assert "staging-api.example.com" in md_text
     assert "examp1e.com" in md_text
     assert "dev-sandbox.example.com" not in md_text
+    # Ensure English-only recommendations
+    assert "Initiate a domain takedown request" in md_text
 
     ioc_data = json.loads(ioc_json_file.read_text(encoding="utf-8"))
     assert ioc_data["metadata"]["target_domain"] == "example.com"
@@ -178,7 +182,7 @@ async def test_full_end_to_end_pipeline_creates_reports_and_notifies(tmp_path: P
     indicators = {i["indicator_value"]: i for i in ioc_data["indicators"]}
     assert indicators["staging-api.example.com"]["severity"] == "CRITICAL"
     assert indicators["examp1e.com"]["category"] == "TYPOSQUAT_ACTIVE"
-    assert indicators["examp1e.com"]["severity"] == "HIGH"
+    assert indicators["examp1e.com"]["severity"] == "CRITICAL"
     assert indicators["orphan.example.com"]["severity"] == "LOW"
 
     # Only HIGH & CRITICAL alerts (staging-api.example.com & examp1e.com) trigger Telegram
