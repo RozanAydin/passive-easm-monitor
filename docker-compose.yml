@@ -1,0 +1,12 @@
+services:
+  easm-monitor:
+    build: .
+    container_name: passive-easm-threat-monitor
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+    restart: "no"

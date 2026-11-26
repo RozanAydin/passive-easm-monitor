@@ -1,0 +1,28 @@
+project:
+  name: "Passive EASM & Brand Threat Intelligence Monitor"
+  environment: "development"
+
+database:
+  url: "sqlite:///data/threat_intel.db"
+
+targets:
+  - domain: "example.com"
+    enable_easm: true
+    enable_typosquat: true
+    exclude_subdomains:
+      - "dev-sandbox.example.com"
+
+collector_settings:
+  dns_concurrency: 20
+  request_timeout_sec: 10
+  rate_limit_delay_sec: 0.5
+  sensitive_ports: [21, 22, 23, 25, 445, 1433, 3306, 3389, 5432, 6379, 9200, 27017]
+
+alerting:
+  enabled: true
+  min_severity: "HIGH" # Hanya kirim notifikasi real-time untuk HIGH & CRITICAL
+  webhook_provider: "telegram" # telegram | slack | discord
+
+reporting:
+  output_dir: "./reports"
+  export_formats: ["markdown", "json", "csv"]

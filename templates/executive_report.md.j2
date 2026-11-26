@@ -1,0 +1,69 @@
+# Executive Threat Intelligence Report
+
+**Target Domain:** `{{ target_domain }}`  
+**Scan Run ID:** `{{ scan_run_id }}`  
+**Generated At (UTC):** `{{ generated_at }}`  
+**Total Subdomains Monitored:** {{ total_subdomains }}  
+**New Findings This Run:** {{ total_new_findings }}
+
+---
+
+## 1. Severity Summary
+
+| Severity | Count |
+| --- | ---: |
+| CRITICAL | {{ severity_counts.CRITICAL }} |
+| HIGH | {{ severity_counts.HIGH }} |
+| MEDIUM | {{ severity_counts.MEDIUM }} |
+| LOW | {{ severity_counts.LOW }} |
+
+---
+
+## 2. New Findings & Alerts (Delta Analysis)
+
+{% if alerts %}
+| Severity | Category | Indicator | Description |
+| --- | --- | --- | --- |
+{% for alert in alerts %}| **{{ alert.severity }}** | `{{ alert.category }}` | `{{ alert.indicator }}` | {{ alert.description }} |
+{% endfor %}
+{% else %}
+No new security deltas detected in this scan run. Attack surface state matches the previous baseline.
+{% endif %}
+
+---
+
+## 3. External Attack Surface Inventory (Subdomains & Passive Enrichment)
+
+{% if subdomains %}
+| Subdomain (FQDN) | Resolving | IP Address | Open Ports | CVEs |
+| --- | --- | --- | --- | --- |
+{% for sub in subdomains %}| `{{ sub.fqdn }}` | {{ "Yes" if sub.is_resolving else "No (NXDOMAIN)" }} | `{{ sub.ip_address or "-" }}` | {{ sub.open_ports | join(", ") if sub.open_ports else "-" }} | {{ sub.cves | join(", ") if sub.cves else "-" }} |
+{% endfor %}
+{% else %}
+No subdomains recorded for this target.
+{% endif %}
+
+---
+
+## 4. Brand & Typosquatting Monitoring
+
+{% if typosquats %}
+| Spoof Domain | Permutation Type | IP Address | Active MX | Registrar | Registration Date |
+| --- | --- | --- | --- | --- | --- |
+{% for ts in typosquats %}| `{{ ts.spoof_domain }}` | `{{ ts.permutation_type }}` | `{{ ts.ip_address or "-" }}` | {{ "Yes" if ts.has_mx_record else "No" }} | {{ ts.registrar or "Unknown" }} | {{ ts.registration_date or "-" }} |
+{% endfor %}
+{% else %}
+No active typosquatting domains detected.
+{% endif %}
+
+---
+
+## 5. Recommended Actions (IoC Remediation)
+
+{% if indicators %}
+{% for ioc in indicators %}
+- **[{{ ioc.severity }}] `{{ ioc.indicator_value }}`** (`{{ ioc.category }}`): {{ ioc.recommended_action }}
+{% endfor %}
+{% else %}
+No immediate remediation actions required.
+{% endif %}
